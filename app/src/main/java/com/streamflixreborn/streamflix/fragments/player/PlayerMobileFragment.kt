@@ -130,7 +130,7 @@ class PlayerMobileFragment : Fragment() {
     private var zoomToast: Toast? = null
 
     var currentVideo: Video? = null
-    private var currentServer: Video.Server? = null
+    var currentServer: Video.Server? = null
     private var isIgnoringPip = false
     private var waitingForBypass = false
     private var bypassDone = false

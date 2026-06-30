@@ -1,5 +1,8 @@
 package com.streamflixreborn.streamflix.utils
 
+import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ContentValues
 import android.util.Log
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragment
@@ -14,6 +17,9 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
 import android.net.Uri
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import com.streamflixreborn.streamflix.R
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -23,6 +29,7 @@ import java.util.Collections
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+@SuppressLint("MissingPermission")
 
 @RequiresApi(Build.VERSION_CODES.Q)
 class M3uDownloader(
@@ -35,15 +42,19 @@ class M3uDownloader(
     private val parallelism = 16
     private val retryLimit = 3
 
-    private var restartWatcher = true
+    private var restartWatcher = false
+    private var isDownloading = false
 
-    @Volatile private var bestAudio: String = ""
-    @Volatile private var bestVideo: String = ""
+    @Volatile
+    private var bestAudio: String = ""
+    @Volatile
+    private var bestVideo: String = ""
 
     private val refreshMutex = Mutex()
 
-    private val queue = Channel<Segment>(Channel.UNLIMITED)
+    private var queue = Channel<Segment>(Channel.UNLIMITED)
 
+    // paths
     private val tempDir: File by lazy {
         File(context.cacheDir, "hls/session_${System.currentTimeMillis()}").apply {
             mkdirs()
@@ -55,24 +66,79 @@ class M3uDownloader(
     private val audioOutputFile = File(tempDir, "audio.ts")
     private val videoOutputFile = File(tempDir, "video.ts")
 
+    // segments decryption
     private var aesKey: ByteArray? = null
     private var aesIv: ByteArray? = null
-    private var keyUrl: String? = "https://vixcloud.co/storage/enc.key"  // TODO: hostname dynamically
+    private var keyUrl: String? = null
+    private var keyUrlBase: String? = null
 
-    @Volatile private var audioSegToDownload = 0
-    @Volatile private var videoSegToDownload = 0
+    // segments to dl count
+    @Volatile
+    private var audioSegToDownload = 0
+    @Volatile
+    private var videoSegToDownload = 0
+
+    private val notificationId = 1
+    private val notificationChannelId = "streamflix download"
+    private val notificationBuilder =
+        NotificationCompat.Builder(this.context, notificationChannelId)
+            .setSmallIcon(R.drawable.exo_styled_controls_download)
+            .setContentTitle("Downloading")
+            .setContentText("Download in progress...")
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setOnlyAlertOnce(true)
+            .setProgress(100, 0, false)
+
+    private val notificationManager = NotificationManagerCompat.from(this.context)
+    private val notificationChannel = NotificationChannel(
+        notificationChannelId,
+        "StreamFlix Downloads",
+        NotificationManager.IMPORTANCE_HIGH
+    )
+
     data class Segment(
         val index: Int,
         var url: String,
         val file: File,
         var attempts: Int = 0
     )
+
     fun start() {
+        notificationManager.createNotificationChannel(notificationChannel)
+        if (isDownloading) return
+        isDownloading = true
         startWorkers()
         scope.launch {
             refreshPlaylistsAndEnqueue()
         }
         startCompletionWatcher()
+        notificationManager.notify(notificationId, notificationBuilder.build())
+    }
+
+    private fun resetState() {
+        // stop everything logically
+        isDownloading = false
+        restartWatcher = false
+
+        // reset counters
+        audioSegToDownload = 0
+        videoSegToDownload = 0
+
+        // clear downloaded files
+        audioFiles.clear()
+        videoFiles.clear()
+
+        // reset streams
+        bestAudio = ""
+        bestVideo = ""
+
+        // reset encryption state
+        aesKey = null
+        aesIv = null
+        keyUrl = null
+        keyUrlBase = null
+        queue = Channel(Channel.UNLIMITED)
+
     }
 
     private fun startWorkers() {
@@ -108,8 +174,6 @@ class M3uDownloader(
     private suspend fun downloadSegmentSafe(segment: Segment) {
         try {
             downloadSegment(segment.url, segment.file)
-
-//            Log.d("HLS", "Downloaded segment ${segment.index}")
 
             synchronized(this) {
                 if (segment.file.name.startsWith("audio")) {
@@ -171,13 +235,11 @@ class M3uDownloader(
             // 1. fetch master → update bestAudio/bestVideo
             resolveStreams()
 
-            // 2. fetch and parse playlists
             val audioSegments = parsePlaylist(bestAudio, "audio")
             val videoSegments = parsePlaylist(bestVideo, "video")
             audioSegToDownload = audioSegments.size
             videoSegToDownload = videoSegments.size
 
-            // 3. enqueue both streams
             enqueueSegments(audioSegments)
             enqueueSegments(videoSegments)
         }
@@ -195,6 +257,12 @@ class M3uDownloader(
         val decoded = player.decodeBase64Uri(uri)
 
         val lines = decoded?.lines()
+
+        val server = Regex("(https://[^/]+)").find(decoded.toString())
+        server?.groupValues?.get(1)?.let {
+            keyUrlBase = it
+        }
+
         lines?.forEachIndexed { idx, line ->
             if (line.contains("GROUP-ID=\"audio\"") && line.contains("DEFAULT=YES")) {
                 bestAudio = lines[idx].split("URI=\"")[1].split("\"")[0]
@@ -204,7 +272,7 @@ class M3uDownloader(
             }
         }
         Log.d("BEST-AUDIO", bestAudio)
-        Log.d("BEST-VIDEO",bestVideo)
+        Log.d("BEST-VIDEO", bestVideo)
     }
 
     private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
@@ -224,16 +292,23 @@ class M3uDownloader(
             it.body?.string() ?: ""
         }
 
-        val lines = playlistText.split("\n")
-            .filter { it.isNotBlank() && !it.startsWith("#") }
+        var lines = playlistText.split("\n")
+            .filter { it.isNotBlank() }
 
         lines.forEach { line ->
             if (line.startsWith("#EXT-X-KEY")) {
                 val ivMatch = Regex("IV=0x([0-9A-Fa-f]+)").find(line)
+                val encKeyRoute = Regex("URI=\"([^\"]+)\"").find(line)
+
+                encKeyRoute?.groupValues?.get(1)?.let { encKey ->
+                    keyUrl = keyUrlBase + encKey
+                }
 
                 ivMatch?.groupValues?.get(1)?.let { aesIv = hexToBytes(it) }
             }
         }
+
+        lines = lines.filter { !it.startsWith("#") }
 
         return lines.mapIndexedNotNull { index, segmentUrl ->
 
@@ -265,7 +340,7 @@ class M3uDownloader(
 
             queue.close()
 
-            val newQueue = Channel<Segment>(Channel.UNLIMITED)
+            queue = Channel(Channel.UNLIMITED)
 
             resolveStreams()
 
@@ -275,10 +350,10 @@ class M3uDownloader(
             audioSegToDownload = audio.size
             videoSegToDownload = video.size
 
-            audio.forEach { newQueue.send(it) }
-            video.forEach { newQueue.send(it) }
+            audio.forEach { queue.send(it) }
+            video.forEach { queue.send(it) }
 
-            startWorkersFromQueue(newQueue)
+            startWorkersFromQueue(queue)
             startCompletionWatcher()
         }
     }
@@ -347,8 +422,13 @@ class M3uDownloader(
             copyToDownloads(context.applicationContext, audioOutputFile, "audio.ts")
             copyToDownloads(context.applicationContext, videoOutputFile, "video.ts")
 
-            // TODO: find a convenient way to merge them into an mp4
-
+            isDownloading = false
+            notificationBuilder
+                .setProgress(0, 0, false)
+                .setContentTitle("Download Complete")
+                .setContentText("Download completed!")
+            notificationManager.notify(notificationId, notificationBuilder.build())
+            resetState()
         }
     }
 
@@ -358,19 +438,22 @@ class M3uDownloader(
         }
         scope.launch {
             while (true) {
-                if (restartWatcher) break
+                if (restartWatcher){ break }
                 delay(1000)
 
                 if (audioFiles.size == audioSegToDownload && videoFiles.size == videoSegToDownload) {
                     Log.d("HLS", "Download complete → merging streams")
-
                     buildFinalStreams()
                     break
                 }
-
-                Log.d("AUDIO/VIDEO:", "${audioFiles.size}/$audioSegToDownload ${videoFiles.size}/$videoSegToDownload" )
+                val progress = (audioFiles.size + videoFiles.size).toDouble() / (audioSegToDownload + videoSegToDownload).toDouble()*100
+                notificationBuilder.setProgress(100, progress.toInt(), false)
+                notificationManager.notify(notificationId, notificationBuilder.build())
+                Log.d(
+                    "AUDIO/VIDEO DL:",
+                    "${audioFiles.size}/$audioSegToDownload ${videoFiles.size}/$videoSegToDownload"
+                )
             }
         }
     }
-
 }
