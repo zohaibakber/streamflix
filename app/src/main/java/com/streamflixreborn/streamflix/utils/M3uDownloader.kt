@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.util.Log
-import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -19,7 +18,6 @@ import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
-import androidx.core.net.toUri
 import com.streamflixreborn.streamflix.R
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -32,6 +30,9 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import com.arthenica.ffmpegkit.FFmpegKit;
 import com.arthenica.ffmpegkit.ReturnCode;
+import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragmentArgs
+import com.streamflixreborn.streamflix.models.Video
+import java.util.Base64
 import kotlin.math.max
 
 @SuppressLint("MissingPermission")
@@ -39,7 +40,8 @@ import kotlin.math.max
 @RequiresApi(Build.VERSION_CODES.Q)
 class M3uDownloader(
     private val context: Context,
-    val player : PlayerMobileFragment,
+    private val getCurrentVideo: () -> Video?,
+    private val getArgs: () -> PlayerMobileFragmentArgs,
     private val client: OkHttpClient = OkHttpClient(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
@@ -59,13 +61,14 @@ class M3uDownloader(
 
     private var queue = Channel<Segment>(Channel.UNLIMITED)
 
+    private var title: String? = getArgs().title
+
     // paths
     private val tempDir: File by lazy {
         File(context.cacheDir, "hls/session_${System.currentTimeMillis()}").apply {
             mkdirs()
         }
     }
-
     private val audioFiles = Collections.synchronizedList(mutableListOf<File>())
     private val videoFiles = Collections.synchronizedList(mutableListOf<File>())
     private val audioOutputFile = File(tempDir, "audio.ts")
@@ -88,7 +91,7 @@ class M3uDownloader(
     private val notificationBuilder =
         NotificationCompat.Builder(this.context, notificationChannelId)
             .setSmallIcon(R.drawable.exo_styled_controls_download)
-            .setContentTitle("Downloading")
+            .setContentTitle("Downloading $title")
             .setContentText("Download in progress...")
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOnlyAlertOnce(true)
@@ -116,28 +119,22 @@ class M3uDownloader(
         scope.launch {
             refreshPlaylistsAndEnqueue()
         }
-        startCompletionWatcher()
         notificationManager.notify(notificationId, notificationBuilder.build())
     }
 
     private fun resetState() {
-        // stop everything logically
         isDownloading = false
         restartWatcher = false
 
-        // reset counters
         audioSegToDownload = 0
         videoSegToDownload = 0
 
-        // clear downloaded files
         audioFiles.clear()
         videoFiles.clear()
 
-        // reset streams
         bestAudio = ""
         bestVideo = ""
 
-        // reset encryption state
         aesKey = null
         aesIv = null
         keyUrl = null
@@ -237,14 +234,14 @@ class M3uDownloader(
 
             Log.d("HLS", "Refreshing playlists...")
 
-            // 1. fetch master → update bestAudio/bestVideo
             resolveStreams()
 
             val audioSegments = parsePlaylist(bestAudio, "audio")
             val videoSegments = parsePlaylist(bestVideo, "video")
             audioSegToDownload = audioSegments.size
             videoSegToDownload = videoSegments.size
-
+            title = getArgs().title
+            startCompletionWatcher()
             enqueueSegments(audioSegments, videoSegments)
         }
     }
@@ -256,9 +253,24 @@ class M3uDownloader(
             .toByteArray()
     }
 
+    private fun decodeBase64Uri(uri: String): String? {
+        return try {
+            val parts = uri.split(",")
+            if (parts.size == 2 && parts[0].contains(";base64")) {
+                val base64Data = parts[1]
+                val decodedBytes = Base64.getDecoder().decode(base64Data)
+                String(decodedBytes, Charsets.UTF_8)
+            } else {
+                null
+            }
+        } catch (ignored: Exception) {
+            null
+        }
+    }
+
     private fun resolveStreams() {
-        val uri = player.currentVideo?.source.toString()
-        val decoded = player.decodeBase64Uri(uri)
+        val uri = getCurrentVideo()?.source.toString()
+        val decoded = decodeBase64Uri(uri)
 
         val lines = decoded?.lines()
 
@@ -295,7 +307,6 @@ class M3uDownloader(
             if (!it.isSuccessful) throw RuntimeException("Playlist failed")
             it.body?.string() ?: ""
         }
-
         var lines = playlistText.split("\n")
             .filter { it.isNotBlank() }
 
@@ -409,46 +420,15 @@ class M3uDownloader(
 
             val outputFile = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "output.mp4"
+                "$title.mp4"
             )
 
             notificationBuilder
                 .setProgress(0, 0, false)
-                .setContentTitle("Merging into mp4")
-                .setContentText("Merging into mp4!")
+                .setContentTitle("Processing $title.mp4")
+                .setContentText("Merging streams into mp4...")
             notificationManager.notify(notificationId, notificationBuilder.build())
-            resetState()
-
             mergeToMp4(audioOutputFile, videoOutputFile, outputFile)
-
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.provider",
-                outputFile
-            )
-
-            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                setDataAndType(uri, "video/mp4")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-
-            val pendingIntent = PendingIntent.getActivity(
-                context,
-                0,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-
-            isDownloading = false
-            notificationBuilder
-                .setProgress(0, 0, false)
-                .setContentTitle("Merge completed!")
-                .setContentText(outputFile.name)
-                .setContentIntent(pendingIntent)
-                .setProgress(0, 0, false)
-            notificationManager.notify(notificationId, notificationBuilder.build())
-            resetState()
         }
     }
 
@@ -458,7 +438,7 @@ class M3uDownloader(
         }
         scope.launch {
             while (true) {
-                if (restartWatcher){ break }
+                if (restartWatcher) break
                 delay(1000)
 
                 val progress = (audioFiles.size + videoFiles.size).toDouble() / (audioSegToDownload + videoSegToDownload).toDouble()*100
@@ -469,7 +449,7 @@ class M3uDownloader(
                     "${audioFiles.size}/$audioSegToDownload ${videoFiles.size}/$videoSegToDownload"
                 )
 
-                if (audioFiles.size == audioSegToDownload && videoFiles.size == videoSegToDownload) {
+                if (audioFiles.size == audioSegToDownload && videoFiles.size == videoSegToDownload && audioSegToDownload != 0 && videoSegToDownload != 0) {
                     Log.d("HLS", "Download complete → merging streams")
                     buildFinalStreams()
                     break
@@ -489,6 +469,7 @@ class M3uDownloader(
             }
 
             val cmd = """
+            -y
             -i ${audioInputFile.path} 
             -i ${videoInputFile.path}
             -c:v copy
@@ -502,9 +483,38 @@ class M3uDownloader(
                 { session ->
                     if (ReturnCode.isSuccess(session.returnCode)) {
                         Log.d("FFMPEG", "Done")
+                        val uri = FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.provider",
+                            outputMp4
+                        )
+
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "video/mp4")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+
+                        val pendingIntent = PendingIntent.getActivity(
+                            context,
+                            0,
+                            intent,
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                        )
+
+
+                        isDownloading = false
+                        notificationBuilder
+                            .setProgress(0, 0, false)
+                            .setContentTitle("$title.mp4 completed!")
+                            .setContentText(outputMp4.name)
+                            .setContentIntent(pendingIntent)
+                            .setProgress(0, 0, false)
+                        notificationManager.notify(notificationId, notificationBuilder.build())
+                        resetState()
                     } else {
                         Log.e("FFMPEG", "Failed")
                     }
+                    resetState()
                 },
                 { log ->
                     Log.d("FFMPEG", log.message)
@@ -515,8 +525,8 @@ class M3uDownloader(
                     val percent = (processed.toDouble() / totalSize * 100).toInt()
                     notificationBuilder
                         .setProgress(0, 0, false)
-                        .setContentTitle("Merging into mp4!")
-                        .setContentText("Merging int progress...")
+                        .setContentTitle("Processing $title.mp4")
+                        .setContentText("Merging in progress...")
                         .setProgress(100, percent, false)
                     notificationManager.notify(notificationId, notificationBuilder.build())
                 }

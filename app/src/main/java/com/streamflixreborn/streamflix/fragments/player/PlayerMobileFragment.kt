@@ -129,8 +129,8 @@ class PlayerMobileFragment : Fragment() {
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
 
-    var currentVideo: Video? = null
-    var currentServer: Video.Server? = null
+    private var currentVideo: Video? = null
+    private var currentServer: Video.Server? = null
     private var isIgnoringPip = false
     private var waitingForBypass = false
     private var bypassDone = false
@@ -518,7 +518,11 @@ class PlayerMobileFragment : Fragment() {
                 }
             }
         }
-        m3uDownloader = M3uDownloader(this.requireContext(), this)
+        m3uDownloader = M3uDownloader(
+            this.requireContext(),
+            { currentVideo },
+            { args }
+        )
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
@@ -877,7 +881,7 @@ class PlayerMobileFragment : Fragment() {
         }
     }
 
-    public fun decodeBase64Uri(uri: String): String? {
+    private fun decodeBase64Uri(uri: String): String? {
         return try {
             val parts = uri.split(",")
             if (parts.size == 2 && parts[0].contains(";base64")) {
