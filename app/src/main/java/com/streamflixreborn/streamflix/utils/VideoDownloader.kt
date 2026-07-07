@@ -39,13 +39,15 @@ import kotlin.math.max
 
 data class HlsStream(
     val uri: String,
-    val bandwidth: Long,
-    val codecs: String?,
+    val bandwidth: Long = 0,
+    val codecs: String? = null,
     val resolution: String? = null,
-    val audioGroup: String? = null
+    val audioGroup: String? = null,
+    val type: String? = null
 )
 
-fun parseBestStreams(m3u8: String): Triple<HlsStream?, HlsStream?, HlsStream?> {
+fun parseBestStreams(m3u8: String): Pair<HlsStream?, HlsStream?> {
+    Log.d("M3U8:", m3u8)
     val lines = m3u8.lines()
         .map { it.trim() }
         .filter { it.isNotEmpty() }
@@ -55,6 +57,18 @@ fun parseBestStreams(m3u8: String): Triple<HlsStream?, HlsStream?, HlsStream?> {
 
     for (line in lines) {
         when {
+            line.startsWith("#EXT-X-MEDIA") -> {
+                val attrs = parseAttributes(line.substringAfter(":"))
+
+                if (attrs["TYPE"] == "AUDIO") {
+                    streams += HlsStream(
+                        uri = attrs["URI"]?.trim('"') ?: "",
+                        codecs = "audio",
+                        type = "audio"
+                    )
+                }
+            }
+
             line.startsWith("#EXT-X-STREAM-INF") -> {
                 pendingStreamInf = parseAttributes(
                     line.substringAfter(":")
@@ -69,7 +83,8 @@ fun parseBestStreams(m3u8: String): Triple<HlsStream?, HlsStream?, HlsStream?> {
                     bandwidth = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0,
                     codecs = attrs["CODECS"]?.trim('"'),
                     resolution = attrs["RESOLUTION"],
-                    audioGroup = attrs["AUDIO"]?.trim('"')
+                    audioGroup = attrs["AUDIO"]?.trim('"'),
+                    type = "video"
                 )
 
                 pendingStreamInf = null
@@ -79,6 +94,7 @@ fun parseBestStreams(m3u8: String): Triple<HlsStream?, HlsStream?, HlsStream?> {
 
     fun hasVideo(stream: HlsStream): Boolean {
         val codecs = stream.codecs?.lowercase() ?: return false
+
         return listOf(
             "avc",
             "hvc",
@@ -91,6 +107,7 @@ fun parseBestStreams(m3u8: String): Triple<HlsStream?, HlsStream?, HlsStream?> {
 
     fun hasAudio(stream: HlsStream): Boolean {
         val codecs = stream.codecs?.lowercase() ?: return false
+
         return listOf(
             "mp4a",
             "opus",
@@ -101,33 +118,23 @@ fun parseBestStreams(m3u8: String): Triple<HlsStream?, HlsStream?, HlsStream?> {
         ).any { codecs.contains(it) }
     }
 
-    fun isMuxed(stream: HlsStream): Boolean =
-        hasVideo(stream) && hasAudio(stream)
-
-    val muxed = streams
-        .filter(::isMuxed)
+    // Audio-only stream: must have audio and must NOT have video
+    val bestDedicatedAudio = streams
+        .filter { it.type == "audio" }
         .maxByOrNull { it.bandwidth }
-
-    if (muxed != null) {
-        return Triple(
-            null,
-            null,
-            muxed
-        )
-    }
 
     val bestVideo = streams
-        .filter { hasVideo(it) && !hasAudio(it) }
+        .filter { hasVideo(it) }
         .maxByOrNull { it.bandwidth }
 
-    val bestAudio = streams
-        .filter { hasAudio(it) && !hasVideo(it) }
-        .maxByOrNull { it.bandwidth }
+    val bestAudio = bestDedicatedAudio
+        ?: streams
+            .filter { hasAudio(it) && hasVideo(it) }
+            .maxByOrNull { it.bandwidth }
 
-    return Triple(
+    return Pair(
         bestAudio,
-        bestVideo,
-        null
+        bestVideo
     )
 }
 
@@ -149,6 +156,7 @@ private fun parseAttributes(input: String): Map<String, String> {
 class VideoDownloader(
     private val context: Context,
     private val getCurrentVideo: () -> Video?,
+    private val getCurrentServer: () -> Video.Server?,
     private val getArgs: () -> PlayerMobileFragmentArgs,
     private val client: OkHttpClient = OkHttpClient(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
@@ -164,9 +172,6 @@ class VideoDownloader(
     private var bestAudio: String = ""
     @Volatile
     private var bestVideo: String = ""
-
-    @Volatile
-    private var bestAudioVideo: String = ""
 
     private val refreshMutex = Mutex()
 
@@ -267,10 +272,7 @@ class VideoDownloader(
         if (aesKey != null) return
         if (keyUrl == null) return
 
-        val baseUrl = UserPreferences.currentProvider!!.baseUrl
-
-        // TODO: Baseurl changed. find a way to take the extractor's main url
-        // TODO: parseBestAudio finds an audio+video, but it's only video. fix it.
+        val baseUrl = getCurrentServer()?.src.toString()
 
         val resolved = if (keyUrl!!.startsWith("http")) {
             keyUrl!!
@@ -278,8 +280,21 @@ class VideoDownloader(
             baseUrl.split("//")[0] + "//" + baseUrl.split("//")[1].split("/")[0] + keyUrl!!
         }
 
-        val response = makeRequest(resolved)
-        aesKey = response.toByteArray()
+        Log.d("KEY_URL:", resolved)
+
+        val request = Request.Builder()
+            .url(resolved)
+            .get()
+            .header("User-Agent", userAgent)
+            .header("Accept", "*/*")
+            .build()
+
+        aesKey = client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                Log.d("RESPONSE:", "${response.code}: $keyUrl")
+            }
+            response.body!!.bytes()
+        }
     }
 
     private suspend fun downloadSegmentSafe(segment: Segment) {
@@ -293,7 +308,6 @@ class VideoDownloader(
                     videoFiles.add(segment.file)
                 }
             }
-
         } catch (e: Exception) {
             Log.d("EXCEPTION:", e.message.toString())
             segment.attempts++
@@ -316,11 +330,20 @@ class VideoDownloader(
     }
 
     private fun downloadSegment(url: String, file: File) {
-        val body = makeRequest(url)
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Accept", "*/*")
+            .build()
+
+        val encrypted = client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                Log.d("RESPONSE:", "${response.code}: $url")
+            }
+            response.body!!.bytes()
+        }
 
         ensureKeyLoaded()
-
-        val encrypted = body.toByteArray()
 
         val decrypted = decryptAes128(
             encrypted,
@@ -328,7 +351,7 @@ class VideoDownloader(
             aesIv ?: ByteArray(16)
         )
 
-        file.outputStream().use { it.write(decrypted) }
+        file.writeBytes(decrypted)
     }
 
     private suspend fun refreshPlaylistsAndEnqueue() {
@@ -338,18 +361,12 @@ class VideoDownloader(
 
             resolveStreams()
 
-            if (bestAudio != "" && bestVideo != "" ) {
-                val audioSegments = parsePlaylist(bestAudio, "audio")
-                val videoSegments = parsePlaylist(bestVideo, "video")
-                audioSegToDownload = audioSegments.size
-                videoSegToDownload = videoSegments.size
-                enqueueSegments(audioSegments, videoSegments)
-            } else {
-                val audioVideoSegments = parsePlaylist(bestAudioVideo, "video")
-                audioSegToDownload = 0
-                videoSegToDownload = audioVideoSegments.size
-                enqueueSegments(audioVideoSegments, emptyList())
-            }
+            val audioSegments = parsePlaylist(bestAudio, "audio")
+            val videoSegments = parsePlaylist(bestVideo, "video")
+            audioSegToDownload = audioSegments.size
+            videoSegToDownload = videoSegments.size
+            enqueueSegments(audioSegments, videoSegments)
+
             title = getArgs().title + getArgs().subtitle
             startCompletionWatcher()
         }
@@ -409,11 +426,10 @@ class VideoDownloader(
             makeRequest(uri)
         } else decodeBase64Uri(uri)
 
-        val (bestAudioTemp, bestVideoTemp, bestAudioVideoTemp) = parseBestStreams(decoded!!)
+        val (bestAudioTemp, bestVideoTemp) = parseBestStreams(decoded!!)
 
         bestAudio = bestAudioTemp?.uri ?: ""
         bestVideo = bestVideoTemp?.uri ?: ""
-        bestAudioVideo = bestAudioVideoTemp?.uri ?: ""
 
         if (!bestAudio.startsWith("http") && bestAudio != "") {
             val cdn = uri.split("master")[0]
@@ -425,14 +441,8 @@ class VideoDownloader(
             bestVideo = cdn + bestVideo
         }
 
-        if (!bestAudioVideo.startsWith("http") && bestAudioVideo != "") {
-            val cdn = uri.split("master")[0]
-            bestAudioVideo = cdn + bestAudioVideo
-        }
-
         Log.d("BEST-AUDIO", bestAudio)
         Log.d("BEST-VIDEO", bestVideo)
-        Log.d("BEST-AUDIOVIDEO", bestAudioVideo)
     }
 
     private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
@@ -445,6 +455,8 @@ class VideoDownloader(
     }
 
     private fun parsePlaylist(url: String, type: String): List<Segment> {
+        Log.d("URL:", url)
+        val baseUrl = url.split("index")[0]
         val playlistText = makeRequest(url)
         var lines = playlistText.split("\n")
             .filter { it.isNotBlank() }
@@ -464,8 +476,11 @@ class VideoDownloader(
 
         lines = lines.filter { !it.startsWith("#") }
 
-        return lines.mapIndexedNotNull { index, segmentUrl ->
-
+        return lines.mapIndexedNotNull { index, segUrl ->
+            var segmentUrl = segUrl
+            if (!segUrl.startsWith("http")) {
+                segmentUrl = baseUrl + segUrl
+            }
             val file = File(tempDir, "$type-$index.ts")
 
             // SKIP if already downloaded on disk
@@ -502,18 +517,11 @@ class VideoDownloader(
             resolveStreams()
 
             // replace queue reference safely (simple restart model)
-            if (bestAudio != "" && bestVideo != "" ) {
-                val audioSegments = parsePlaylist(bestAudio, "audio")
-                val videoSegments = parsePlaylist(bestVideo, "video")
-                audioSegToDownload = audioSegments.size
-                videoSegToDownload = videoSegments.size
-                enqueueSegments(audioSegments, videoSegments)
-            } else {
-                val audioVideoSegments = parsePlaylist(bestAudioVideo, "video")
-                audioSegToDownload = 0
-                videoSegToDownload = audioVideoSegments.size
-                enqueueSegments(audioVideoSegments, emptyList())
-            }
+            val audioSegments = parsePlaylist(bestAudio, "audio")
+            val videoSegments = parsePlaylist(bestVideo, "video")
+            audioSegToDownload = audioSegments.size
+            videoSegToDownload = videoSegments.size
+            enqueueSegments(audioSegments, videoSegments)
 
             startWorkersFromQueue(queue)
             startCompletionWatcher()

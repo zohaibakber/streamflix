@@ -521,6 +521,7 @@ class PlayerMobileFragment : Fragment() {
         videoDownloader = VideoDownloader(
             this.requireContext(),
             { currentVideo },
+            { currentServer },
             { args }
         )
     }
