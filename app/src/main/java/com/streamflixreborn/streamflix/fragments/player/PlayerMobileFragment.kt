@@ -98,7 +98,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.internal.userAgent
 import java.util.Locale
 import com.streamflixreborn.streamflix.extractors.TokenManager
-import com.streamflixreborn.streamflix.utils.M3uDownloader
+import com.streamflixreborn.streamflix.utils.VideoDownloader
 
 class PlayerMobileFragment : Fragment() {
     companion object {
@@ -124,7 +124,7 @@ class PlayerMobileFragment : Fragment() {
     private lateinit var progressHandler: android.os.Handler
     private lateinit var progressRunnable: Runnable
     private lateinit var gestureHelper: PlayerGestureHelper
-    private lateinit var m3uDownloader: M3uDownloader
+    private lateinit var videoDownloader: VideoDownloader
 
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
@@ -518,7 +518,7 @@ class PlayerMobileFragment : Fragment() {
                 }
             }
         }
-        m3uDownloader = M3uDownloader(
+        videoDownloader = VideoDownloader(
             this.requireContext(),
             { currentVideo },
             { args }
@@ -682,7 +682,7 @@ class PlayerMobileFragment : Fragment() {
         }
 
         binding.pvPlayer.controller.binding.btnExoDownload.setOnClickListener {
-            m3uDownloader.start()
+            videoDownloader.start()
         }
 
         binding.pvPlayer.controller.binding.btnExoAspectRatio.setOnClickListener {
