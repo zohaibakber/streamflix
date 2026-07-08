@@ -30,6 +30,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import com.arthenica.ffmpegkit.FFmpegKit;
 import com.arthenica.ffmpegkit.ReturnCode;
+import com.streamflixreborn.streamflix.extractors.TokenManager
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragmentArgs
 import com.streamflixreborn.streamflix.models.Video
 import okhttp3.Headers
@@ -47,7 +48,6 @@ data class HlsStream(
 )
 
 fun parseBestStreams(m3u8: String): Pair<HlsStream?, HlsStream?> {
-    Log.d("M3U8:", m3u8)
     val lines = m3u8.lines()
         .map { it.trim() }
         .filter { it.isNotEmpty() }
@@ -194,6 +194,7 @@ class VideoDownloader(
     private var aesKey: ByteArray? = null
     private var aesIv: ByteArray? = null
     private var keyUrl: String? = null
+    private var lastToken: String? = null
 
     // segments to dl count
     @Volatile
@@ -231,7 +232,7 @@ class VideoDownloader(
         if (isDownloading) return
         isDownloading = true
         scope.launch {
-        startWorkers()
+            startWorkersFromQueue(queue)
             refreshPlaylistsAndEnqueue()
         }
         notificationManager.notify(notificationId, notificationBuilder.build())
@@ -257,17 +258,6 @@ class VideoDownloader(
 
     }
 
-    private fun startWorkers() {
-        repeat(parallelism) {
-            scope.launch {
-                for (segment in queue) {
-                    Log.d("SEG:", "downloading segment...")
-                    downloadSegmentSafe(segment)
-                }
-            }
-        }
-    }
-
     private fun ensureKeyLoaded() {
         if (aesKey != null) return
         if (keyUrl == null) return
@@ -291,13 +281,14 @@ class VideoDownloader(
 
         aesKey = client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                Log.d("RESPONSE:", "${response.code}: $keyUrl")
+                Log.d("RESPONSE (AES_KEY):", "${response.code}: $keyUrl")
             }
             response.body!!.bytes()
         }
     }
 
     private suspend fun downloadSegmentSafe(segment: Segment) {
+        if (lastToken != null && !segment.url.contains(lastToken.toString())) return
         try {
             downloadSegment(segment.url, segment.file)
 
@@ -309,13 +300,15 @@ class VideoDownloader(
                 }
             }
         } catch (e: Exception) {
-            Log.d("EXCEPTION:", e.message.toString())
+            Log.d("EXCEPTION(dlSegSafe):", e.message.toString())
             segment.attempts++
 
             val isAuthError = e.message?.contains("401") == true ||
                     e.message?.contains("403") == true
 
             if (isAuthError) {
+                if (refreshMutex.isLocked) return
+
                 handleTokenExpiry()
                 queue.send(segment.copy(url = segment.url))
                 return
@@ -330,26 +323,17 @@ class VideoDownloader(
     }
 
     private fun downloadSegment(url: String, file: File) {
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .header("Accept", "*/*")
-            .build()
-
-        val encrypted = client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                Log.d("RESPONSE:", "${response.code}: $url")
-            }
-            response.body!!.bytes()
-        }
+        val encrypted = makeRequest(url)
 
         ensureKeyLoaded()
 
-        val decrypted = decryptAes128(
+        val decrypted = if (aesKey != null) { decryptAes128(
             encrypted,
             aesKey!!,
             aesIv ?: ByteArray(16)
-        )
+        ) } else {
+            encrypted
+        }
 
         file.writeBytes(decrypted)
     }
@@ -363,8 +347,8 @@ class VideoDownloader(
 
             val audioSegments = parsePlaylist(bestAudio, "audio")
             val videoSegments = parsePlaylist(bestVideo, "video")
-            audioSegToDownload = audioSegments.size
-            videoSegToDownload = videoSegments.size
+            if (audioSegToDownload == 0) audioSegToDownload = audioSegments.size
+            if (videoSegToDownload == 0) videoSegToDownload = videoSegments.size
             enqueueSegments(audioSegments, videoSegments)
 
             title = getArgs().title + getArgs().subtitle
@@ -394,7 +378,7 @@ class VideoDownloader(
         }
     }
 
-    private fun makeRequest(uri: String): String {
+    private fun makeRequest(uri: String): ByteArray {
         val headers = mapOf(
             "User-Agent" to userAgent,
         ) + (getCurrentVideo()?.headers ?: emptyMap())
@@ -403,6 +387,7 @@ class VideoDownloader(
             .url(uri)
             .headers(
                 Headers.Builder().apply {
+
                     headers.forEach { (key, value) ->
                         add(key, value)
                     }
@@ -415,15 +400,23 @@ class VideoDownloader(
                 Log.d("MAKEREQUEST FAILED(${it.code}):", uri)
                 throw RuntimeException("Playlist failed: ${it.code}")
             }
-            return it.body?.string() ?: ""
+            return it.body?.bytes() ?: ByteArray(0)
         }
     }
 
 
     private fun resolveStreams() {
-        val uri = getCurrentVideo()?.source.toString()
+        var uri = getCurrentVideo()?.source.toString()
+        lastToken = TokenManager.latestQuery
+        if (lastToken != null) {
+            val delimiter = lastToken.toString().split("=")[0] + "="
+           uri = uri.split(delimiter)[0] + TokenManager.latestQuery
+        }
+
+        Log.d("CURRENT_VIDEO:", uri)
+
         val decoded = if (uri.startsWith("http"))  {
-            makeRequest(uri)
+            makeRequest(uri).toString(Charsets.UTF_8)
         } else decodeBase64Uri(uri)
 
         val (bestAudioTemp, bestVideoTemp) = parseBestStreams(decoded!!)
@@ -455,9 +448,9 @@ class VideoDownloader(
     }
 
     private fun parsePlaylist(url: String, type: String): List<Segment> {
-        Log.d("URL:", url)
         val baseUrl = url.split("index")[0]
-        val playlistText = makeRequest(url)
+        val playlistText = makeRequest(url).toString(Charsets.UTF_8)
+
         var lines = playlistText.split("\n")
             .filter { it.isNotBlank() }
 
@@ -519,8 +512,6 @@ class VideoDownloader(
             // replace queue reference safely (simple restart model)
             val audioSegments = parsePlaylist(bestAudio, "audio")
             val videoSegments = parsePlaylist(bestVideo, "video")
-            audioSegToDownload = audioSegments.size
-            videoSegToDownload = videoSegments.size
             enqueueSegments(audioSegments, videoSegments)
 
             startWorkersFromQueue(queue)
@@ -686,3 +677,6 @@ class VideoDownloader(
         }
     }
 }
+
+// TODO: need to handle better playlists refresh
+// TODO: decryption is going bad. possible wrong data from makeRequest()
