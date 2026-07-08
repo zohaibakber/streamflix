@@ -272,19 +272,7 @@ class VideoDownloader(
 
         Log.d("KEY_URL:", resolved)
 
-        val request = Request.Builder()
-            .url(resolved)
-            .get()
-            .header("User-Agent", userAgent)
-            .header("Accept", "*/*")
-            .build()
-
-        aesKey = client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                Log.d("RESPONSE (AES_KEY):", "${response.code}: $keyUrl")
-            }
-            response.body!!.bytes()
-        }
+        aesKey = makeRequest(resolved, "AESKey")
     }
 
     private suspend fun downloadSegmentSafe(segment: Segment) {
@@ -323,7 +311,7 @@ class VideoDownloader(
     }
 
     private fun downloadSegment(url: String, file: File) {
-        val encrypted = makeRequest(url)
+        val encrypted = makeRequest(url, "dlSeg")
 
         ensureKeyLoaded()
 
@@ -351,7 +339,7 @@ class VideoDownloader(
             if (videoSegToDownload == 0) videoSegToDownload = videoSegments.size
             enqueueSegments(audioSegments, videoSegments)
 
-            title = getArgs().title + getArgs().subtitle
+            title = "${getArgs().title} - ${getArgs().subtitle}"
             startCompletionWatcher()
         }
     }
@@ -378,7 +366,7 @@ class VideoDownloader(
         }
     }
 
-    private fun makeRequest(uri: String): ByteArray {
+    private fun makeRequest(uri: String, origin: String): ByteArray {
         val headers = mapOf(
             "User-Agent" to userAgent,
         ) + (getCurrentVideo()?.headers ?: emptyMap())
@@ -397,7 +385,7 @@ class VideoDownloader(
 
         client.newCall(request).execute().use {
             if (!it.isSuccessful) {
-                Log.d("MAKEREQUEST FAILED(${it.code}):", uri)
+                Log.d("MakeReq $origin (${it.code}):", uri)
                 throw RuntimeException("Playlist failed: ${it.code}")
             }
             return it.body?.bytes() ?: ByteArray(0)
@@ -416,7 +404,7 @@ class VideoDownloader(
         Log.d("CURRENT_VIDEO:", uri)
 
         val decoded = if (uri.startsWith("http"))  {
-            makeRequest(uri).toString(Charsets.UTF_8)
+            makeRequest(uri, "resStr").toString(Charsets.UTF_8)
         } else decodeBase64Uri(uri)
 
         val (bestAudioTemp, bestVideoTemp) = parseBestStreams(decoded!!)
@@ -449,7 +437,7 @@ class VideoDownloader(
 
     private fun parsePlaylist(url: String, type: String): List<Segment> {
         val baseUrl = url.split("index")[0]
-        val playlistText = makeRequest(url).toString(Charsets.UTF_8)
+        val playlistText = makeRequest(url, "parsPlay").toString(Charsets.UTF_8)
 
         var lines = playlistText.split("\n")
             .filter { it.isNotBlank() }
@@ -509,7 +497,6 @@ class VideoDownloader(
 
             resolveStreams()
 
-            // replace queue reference safely (simple restart model)
             val audioSegments = parsePlaylist(bestAudio, "audio")
             val videoSegments = parsePlaylist(bestVideo, "video")
             enqueueSegments(audioSegments, videoSegments)
@@ -677,6 +664,3 @@ class VideoDownloader(
         }
     }
 }
-
-// TODO: need to handle better playlists refresh
-// TODO: decryption is going bad. possible wrong data from makeRequest()
