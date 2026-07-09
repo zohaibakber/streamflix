@@ -110,6 +110,8 @@
             </intent-filter>
         </activity>
 
+        <receiver android:name=".utils.download.DownloadCancelReceiver" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.provider"

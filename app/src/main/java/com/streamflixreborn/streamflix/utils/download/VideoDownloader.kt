@@ -1,4 +1,4 @@
-package com.streamflixreborn.streamflix.utils
+package com.streamflixreborn.streamflix.utils.download
 
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
@@ -18,6 +18,7 @@ import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
+import androidx.core.net.toUri
 import com.streamflixreborn.streamflix.R
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -33,123 +34,11 @@ import com.arthenica.ffmpegkit.ReturnCode;
 import com.streamflixreborn.streamflix.extractors.TokenManager
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragmentArgs
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.plus
 import okhttp3.Headers
 import okhttp3.internal.userAgent
 import java.util.Base64
 import kotlin.math.max
-
-data class HlsStream(
-    val uri: String,
-    val bandwidth: Long = 0,
-    val codecs: String? = null,
-    val resolution: String? = null,
-    val audioGroup: String? = null,
-    val type: String? = null
-)
-
-fun parseBestStreams(m3u8: String): Pair<HlsStream?, HlsStream?> {
-    val lines = m3u8.lines()
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-
-    val streams = mutableListOf<HlsStream>()
-    var pendingStreamInf: Map<String, String>? = null
-
-    for (line in lines) {
-        when {
-            line.startsWith("#EXT-X-MEDIA") -> {
-                val attrs = parseAttributes(line.substringAfter(":"))
-
-                if (attrs["TYPE"] == "AUDIO") {
-                    streams += HlsStream(
-                        uri = attrs["URI"]?.trim('"') ?: "",
-                        codecs = "audio",
-                        type = "audio"
-                    )
-                }
-            }
-
-            line.startsWith("#EXT-X-STREAM-INF") -> {
-                pendingStreamInf = parseAttributes(
-                    line.substringAfter(":")
-                )
-            }
-
-            !line.startsWith("#") && pendingStreamInf != null -> {
-                val attrs = pendingStreamInf!!
-
-                streams += HlsStream(
-                    uri = line,
-                    bandwidth = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0,
-                    codecs = attrs["CODECS"]?.trim('"'),
-                    resolution = attrs["RESOLUTION"],
-                    audioGroup = attrs["AUDIO"]?.trim('"'),
-                    type = "video"
-                )
-
-                pendingStreamInf = null
-            }
-        }
-    }
-
-    fun hasVideo(stream: HlsStream): Boolean {
-        val codecs = stream.codecs?.lowercase() ?: return false
-
-        return listOf(
-            "avc",
-            "hvc",
-            "hev",
-            "vp8",
-            "vp9",
-            "av01"
-        ).any { codecs.contains(it) }
-    }
-
-    fun hasAudio(stream: HlsStream): Boolean {
-        val codecs = stream.codecs?.lowercase() ?: return false
-
-        return listOf(
-            "mp4a",
-            "opus",
-            "ac-3",
-            "ec-3",
-            "vorbis",
-            "flac"
-        ).any { codecs.contains(it) }
-    }
-
-    // Audio-only stream: must have audio and must NOT have video
-    val bestDedicatedAudio = streams
-        .filter { it.type == "audio" }
-        .maxByOrNull { it.bandwidth }
-
-    val bestVideo = streams
-        .filter { hasVideo(it) }
-        .maxByOrNull { it.bandwidth }
-
-    val bestAudio = bestDedicatedAudio
-        ?: streams
-            .filter { hasAudio(it) && hasVideo(it) }
-            .maxByOrNull { it.bandwidth }
-
-    return Pair(
-        bestAudio,
-        bestVideo
-    )
-}
-
-private fun parseAttributes(input: String): Map<String, String> {
-    val result = mutableMapOf<String, String>()
-
-    Regex("""([A-Z0-9-]+)=("[^"]*"|[^,]*)""")
-        .findAll(input)
-        .forEach {
-            result[it.groupValues[1]] = it.groupValues[2]
-        }
-
-    return result
-}
-
 @SuppressLint("MissingPermission")
 
 @RequiresApi(Build.VERSION_CODES.Q)
@@ -157,7 +46,7 @@ class VideoDownloader(
     private val context: Context,
     private val getCurrentVideo: () -> Video?,
     private val getCurrentServer: () -> Video.Server?,
-    private val getArgs: () -> PlayerMobileFragmentArgs,
+    private val getArgs: () -> VideoDownloadArgs,
     private val client: OkHttpClient = OkHttpClient(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
@@ -202,8 +91,28 @@ class VideoDownloader(
     @Volatile
     private var videoSegToDownload = 0
 
+
+    // notifications
     private val notificationId = 1
     private val notificationChannelId = "streamflix download"
+    private val notificationManager = NotificationManagerCompat.from(this.context)
+    private val notificationChannel = NotificationChannel(
+        notificationChannelId,
+        "StreamFlix Downloads",
+        NotificationManager.IMPORTANCE_HIGH
+    )
+    private val cancelIntent: PendingIntent by lazy {
+        val intent = Intent(context, DownloadCancelReceiver::class.java).apply {
+            action = "CANCEL_DOWNLOAD"
+        }
+
+        PendingIntent.getBroadcast(
+            context,
+            notificationId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
     private val notificationBuilder =
         NotificationCompat.Builder(this.context, notificationChannelId)
             .setSmallIcon(R.drawable.exo_styled_controls_download)
@@ -212,13 +121,11 @@ class VideoDownloader(
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOnlyAlertOnce(true)
             .setProgress(100, 0, false)
-
-    private val notificationManager = NotificationManagerCompat.from(this.context)
-    private val notificationChannel = NotificationChannel(
-        notificationChannelId,
-        "StreamFlix Downloads",
-        NotificationManager.IMPORTANCE_HIGH
-    )
+            .addAction(
+                R.drawable.ic_player_settings_close,
+                "Cancel",
+                cancelIntent
+            )
 
     data class Segment(
         val index: Int,
@@ -333,6 +240,9 @@ class VideoDownloader(
 
             resolveStreams()
 
+            if (bestAudio == "" || bestVideo == "") return
+
+
             val audioSegments = parsePlaylist(bestAudio, "audio")
             val videoSegments = parsePlaylist(bestVideo, "video")
             if (audioSegToDownload == 0) audioSegToDownload = audioSegments.size
@@ -395,6 +305,16 @@ class VideoDownloader(
 
     private fun resolveStreams() {
         var uri = getCurrentVideo()?.source.toString()
+
+        if (uri.endsWith(".mp4")) {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                data = uri.toUri()
+            }
+            context.startActivity(intent, null)
+            cancelDownload()
+            return
+        }
+
         lastToken = TokenManager.latestQuery
         if (lastToken != null) {
             val delimiter = lastToken.toString().split("=")[0] + "="
@@ -568,7 +488,10 @@ class VideoDownloader(
         }
         scope.launch {
             while (true) {
-                if (restartWatcher) break
+                if (restartWatcher) {
+                    notificationManager.cancel(notificationId)
+                    break
+                }
                 delay(1000)
 
                 val progress = (audioFiles.size + videoFiles.size).toDouble() / (audioSegToDownload + videoSegToDownload).toDouble()*100
@@ -587,7 +510,6 @@ class VideoDownloader(
             }
         }
     }
-
 
     fun mergeToMp4(audioInputFile: File, videoInputFile: File, outputMp4: File) {
         scope.launch(Dispatchers.IO) {
@@ -663,4 +585,126 @@ class VideoDownloader(
             )
         }
     }
+
+    fun cancelDownload() {
+        resetState()
+        restartWatcher = true
+    }
+}
+
+data class VideoDownloadArgs(
+    val title: String,
+    val subtitle: String,
+)
+
+data class HlsStream(
+    val uri: String,
+    val bandwidth: Long = 0,
+    val codecs: String? = null,
+    val resolution: String? = null,
+    val audioGroup: String? = null,
+    val type: String? = null
+)
+
+fun parseBestStreams(m3u8: String): Pair<HlsStream?, HlsStream?> {
+    val lines = m3u8.lines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+    val streams = mutableListOf<HlsStream>()
+    var pendingStreamInf: Map<String, String>? = null
+
+    for (line in lines) {
+        when {
+            line.startsWith("#EXT-X-MEDIA") -> {
+                val attrs = parseAttributes(line.substringAfter(":"))
+
+                if (attrs["TYPE"] == "AUDIO") {
+                    streams += HlsStream(
+                        uri = attrs["URI"]?.trim('"') ?: "",
+                        codecs = "audio",
+                        type = "audio"
+                    )
+                }
+            }
+
+            line.startsWith("#EXT-X-STREAM-INF") -> {
+                pendingStreamInf = parseAttributes(
+                    line.substringAfter(":")
+                )
+            }
+
+            !line.startsWith("#") && pendingStreamInf != null -> {
+                val attrs = pendingStreamInf
+
+                streams += HlsStream(
+                    uri = line,
+                    bandwidth = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0,
+                    codecs = attrs["CODECS"]?.trim('"'),
+                    resolution = attrs["RESOLUTION"],
+                    audioGroup = attrs["AUDIO"]?.trim('"'),
+                    type = "video"
+                )
+
+                pendingStreamInf = null
+            }
+        }
+    }
+
+    fun hasVideo(stream: HlsStream): Boolean {
+        val codecs = stream.codecs?.lowercase() ?: return false
+
+        return listOf(
+            "avc",
+            "hvc",
+            "hev",
+            "vp8",
+            "vp9",
+            "av01"
+        ).any { codecs.contains(it) }
+    }
+
+    fun hasAudio(stream: HlsStream): Boolean {
+        val codecs = stream.codecs?.lowercase() ?: return false
+
+        return listOf(
+            "mp4a",
+            "opus",
+            "ac-3",
+            "ec-3",
+            "vorbis",
+            "flac"
+        ).any { codecs.contains(it) }
+    }
+
+    // Audio-only stream: must have audio and must NOT have video
+    val bestDedicatedAudio = streams
+        .filter { it.type == "audio" }
+        .maxByOrNull { it.bandwidth }
+
+    val bestVideo = streams
+        .filter { hasVideo(it) }
+        .maxByOrNull { it.bandwidth }
+
+    val bestAudio = bestDedicatedAudio
+        ?: streams
+            .filter { hasAudio(it) && hasVideo(it) }
+            .maxByOrNull { it.bandwidth }
+
+    return Pair(
+        bestAudio,
+        bestVideo
+    )
+}
+
+private fun parseAttributes(input: String): Map<String, String> {
+    val result = mutableMapOf<String, String>()
+
+    Regex("""([A-Z0-9-]+)=("[^"]*"|[^,]*)""")
+        .findAll(input)
+        .forEach {
+            result[it.groupValues[1]] = it.groupValues[2]
+        }
+
+    return result
 }

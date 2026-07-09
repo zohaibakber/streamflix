@@ -98,7 +98,9 @@ import kotlinx.coroutines.withContext
 import okhttp3.internal.userAgent
 import java.util.Locale
 import com.streamflixreborn.streamflix.extractors.TokenManager
-import com.streamflixreborn.streamflix.utils.VideoDownloader
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadArgs
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadManager
+import com.streamflixreborn.streamflix.utils.download.VideoDownloader
 
 class PlayerMobileFragment : Fragment() {
     companion object {
@@ -522,8 +524,9 @@ class PlayerMobileFragment : Fragment() {
             this.requireContext(),
             { currentVideo },
             { currentServer },
-            { args }
+            { VideoDownloadArgs(args.title, args.subtitle) }
         )
+        VideoDownloadManager.downloader = videoDownloader
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
