@@ -95,4 +95,16 @@
         app:layout_constraintEnd_toEndOf="parent"
         tools:text="Overview" />
 
+    <TextView
+        android:id="@+id/btn_episode_download"
+        style="@style/AppTheme.Widget.Mobile.Button.Secondary"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:text="@string/download"
+        app:layout_constraintStart_toEndOf="@id/guideline1"
+        app:layout_constraintTop_toBottomOf="@id/tv_episode_overview" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

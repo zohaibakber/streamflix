@@ -26,6 +26,7 @@ import com.streamflixreborn.streamflix.ui.ShowOptionsMobileDialog
 import com.streamflixreborn.streamflix.ui.ShowOptionsTvDialog
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadQueue
 import com.streamflixreborn.streamflix.utils.format
 import com.streamflixreborn.streamflix.utils.getCurrentFragment
 import com.streamflixreborn.streamflix.utils.loadTvShowCardArtwork
@@ -149,6 +150,9 @@ class EpisodeViewHolder(
             }
         }
         binding.tvEpisodeOverview.text = episode.overview ?: ""
+        binding.btnEpisodeDownload.setOnClickListener {
+            VideoDownloadQueue.enqueueEpisode(context, episode)
+        }
     }
 
     private fun displayTvItem(binding: ItemEpisodeTvBinding) {
@@ -257,6 +261,9 @@ class EpisodeViewHolder(
             }
         }
         binding.tvEpisodeOverview.text = episode.overview ?: ""
+        binding.btnEpisodeDownload.setOnClickListener {
+            VideoDownloadQueue.enqueueEpisode(context, episode)
+        }
     }
 
     private fun displayContinueWatchingMobileItem(binding: ItemEpisodeContinueWatchingMobileBinding) {

@@ -21,6 +21,7 @@ import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
 import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadQueue
 import kotlinx.coroutines.launch
 
 class SeasonMobileFragment : Fragment() {
@@ -41,6 +42,7 @@ class SeasonMobileFragment : Fragment() {
     }
 
     private val appAdapter = AppAdapter()
+    private var episodes: List<Episode> = emptyList()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -119,9 +121,13 @@ class SeasonMobileFragment : Fragment() {
                 SpacingItemDecoration(20.dp(requireContext()))
             )
         }
+        binding.btnDownloadAllEpisodes.setOnClickListener {
+            VideoDownloadQueue.enqueueEpisodes(requireContext(), episodes)
+        }
     }
 
     private fun displaySeason(episodes: List<Episode>) {
+        this.episodes = episodes
         appAdapter.submitList(episodes.onEach { episode ->
             episode.itemType = AppAdapter.Type.EPISODE_MOBILE_ITEM
         })

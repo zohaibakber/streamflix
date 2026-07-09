@@ -81,6 +81,7 @@ import com.streamflixreborn.streamflix.utils.ArtworkRepair
 import com.streamflixreborn.streamflix.utils.toActivity
 import java.util.Locale
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadQueue
 import com.streamflixreborn.streamflix.providers.Provider
 import android.view.KeyEvent
 import com.streamflixreborn.streamflix.databinding.ContentMovieDirectorsMobileBinding
@@ -700,6 +701,13 @@ class MovieViewHolder(
             }
         }
 
+        binding.btnMovieDownload.setOnClickListener {
+            checkProviderAndRun {
+                VideoDownloadQueue.enqueueMovie(context, movie)
+                Toast.makeText(context, R.string.download, Toast.LENGTH_SHORT).show()
+            }
+        }
+
         binding.pbMovieProgress.apply {
             val watchHistory = movie.watchHistory
 
@@ -815,6 +823,13 @@ class MovieViewHolder(
         }
 
         binding.tvMovieOverview.text = movie.overview
+
+        binding.btnMovieDownload.setOnClickListener {
+            checkProviderAndRun {
+                VideoDownloadQueue.enqueueMovie(context, movie)
+                Toast.makeText(context, R.string.download, Toast.LENGTH_SHORT).show()
+            }
+        }
 
         binding.btnMovieWatchNow.apply {
             setOnClickListener {

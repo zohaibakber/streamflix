@@ -61,6 +61,7 @@ import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.loadTvShowBanner
 import com.streamflixreborn.streamflix.utils.loadTvShowPoster
 import com.streamflixreborn.streamflix.utils.ArtworkRepair
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadQueue
 import com.streamflixreborn.streamflix.providers.Provider
 import java.util.Locale
 
@@ -530,6 +531,9 @@ class TvShowViewHolder(
         }
 
         binding.tvTvShowOverview.text = tvShow.overview
+        binding.btnTvShowDownloadAll.setOnClickListener {
+            downloadAllEpisodes()
+        }
         val episodeToWatch = tvShow.episodeToWatch
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {
@@ -664,6 +668,9 @@ class TvShowViewHolder(
         }
 
         binding.tvTvShowOverview.text = tvShow.overview
+        binding.btnTvShowDownloadAll.setOnClickListener {
+            downloadAllEpisodes()
+        }
         val episodeToWatch = tvShow.episodeToWatch
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {
@@ -751,6 +758,22 @@ class TvShowViewHolder(
             setImageDrawable(
                 ContextCompat.getDrawable(context, tvShow.isFavorite.drawable())
             )
+        }
+    }
+
+    private fun downloadAllEpisodes() {
+        itemView.findViewTreeLifecycleOwner()?.lifecycleScope?.launch(Dispatchers.IO) {
+            val provider = UserPreferences.currentProvider ?: return@launch
+            val episodes = tvShow.seasons.flatMap { season ->
+                val seasonEpisodes = season.episodes.ifEmpty {
+                    provider.getEpisodesBySeason(season.id)
+                }
+                seasonEpisodes.onEach { episode ->
+                    episode.tvShow = tvShow
+                    episode.season = season
+                }
+            }
+            VideoDownloadQueue.enqueueEpisodes(context, episodes)
         }
     }
 

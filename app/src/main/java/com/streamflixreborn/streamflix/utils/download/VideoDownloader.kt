@@ -48,7 +48,8 @@ class VideoDownloader(
     private val getCurrentServer: () -> Video.Server?,
     private val getArgs: () -> VideoDownloadArgs,
     private val client: OkHttpClient = OkHttpClient(),
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    private val onFinished: (Boolean) -> Unit = {}
 ) {
 
     private val parallelism = 16
@@ -56,6 +57,13 @@ class VideoDownloader(
 
     private var restartWatcher = false
     private var isDownloading = false
+    private var hasFinished = false
+
+    private fun finish(success: Boolean) {
+        if (hasFinished) return
+        hasFinished = true
+        onFinished(success)
+    }
 
     @Volatile
     private var bestAudio: String = ""
@@ -138,6 +146,7 @@ class VideoDownloader(
         notificationManager.createNotificationChannel(notificationChannel)
         if (isDownloading) return
         isDownloading = true
+        hasFinished = false
         scope.launch {
             startWorkersFromQueue(queue)
             refreshPlaylistsAndEnqueue()
@@ -562,9 +571,11 @@ class VideoDownloader(
                             .setContentIntent(pendingIntent)
                             .setProgress(0, 0, false)
                         notificationManager.notify(notificationId, notificationBuilder.build())
+                        finish(true)
                         resetState()
                     } else {
                         Log.e("FFMPEG", "Failed")
+                        finish(false)
                     }
                     resetState()
                 },
@@ -589,6 +600,7 @@ class VideoDownloader(
     fun cancelDownload() {
         resetState()
         restartWatcher = true
+        finish(false)
     }
 }
 
