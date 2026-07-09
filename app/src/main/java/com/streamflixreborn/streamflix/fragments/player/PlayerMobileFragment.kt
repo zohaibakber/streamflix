@@ -59,7 +59,6 @@ import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.models.WatchItem
 import com.streamflixreborn.streamflix.providers.SerienStreamProvider
-import com.streamflixreborn.streamflix.ui.PlayerMobileView
 import com.streamflixreborn.streamflix.utils.MediaServer
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.UserDataCache
@@ -73,7 +72,6 @@ import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 import java.util.Calendar
-import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import androidx.core.net.toUri
 import androidx.lifecycle.repeatOnLifecycle
@@ -83,11 +81,11 @@ import java.util.Base64
 import java.io.File
 import java.io.FileOutputStream
 import android.webkit.CookieManager
+import androidx.annotation.RequiresApi
 import androidx.core.content.FileProvider
 import androidx.navigation.NavOptions
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.PlayerGestureHelper
@@ -97,10 +95,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.internal.userAgent
 import java.util.Locale
 import com.streamflixreborn.streamflix.extractors.TokenManager
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadArgs
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadManager
+import com.streamflixreborn.streamflix.utils.download.VideoDownloader
 
 class PlayerMobileFragment : Fragment() {
     companion object {
@@ -126,6 +126,7 @@ class PlayerMobileFragment : Fragment() {
     private lateinit var progressHandler: android.os.Handler
     private lateinit var progressRunnable: Runnable
     private lateinit var gestureHelper: PlayerGestureHelper
+    private lateinit var videoDownloader: VideoDownloader
 
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
@@ -138,6 +139,7 @@ class PlayerMobileFragment : Fragment() {
     private var nextEpisodePrefetchTargetId: String? = null
     private var nextEpisodePrefetchJob: Job? = null
     private var nextEpisodeOverlayDismissed = false
+
 
     private val bypassWebViewLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -265,6 +267,7 @@ class PlayerMobileFragment : Fragment() {
         } catch (ignored: Exception) {}
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         initializePlayer(false)
@@ -517,8 +520,13 @@ class PlayerMobileFragment : Fragment() {
                 }
             }
         }
-
-
+        videoDownloader = VideoDownloader(
+            this.requireContext(),
+            { currentVideo },
+            { currentServer },
+            { VideoDownloadArgs(args.title, args.subtitle) }
+        )
+        VideoDownloadManager.downloader = videoDownloader
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
@@ -573,7 +581,7 @@ class PlayerMobileFragment : Fragment() {
         else -> false
     }
 
-
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun initializeVideo() {
         WindowCompat.getInsetsController(
             requireActivity().window,
@@ -675,6 +683,10 @@ class PlayerMobileFragment : Fragment() {
             } else {
                 enterPIPMode()
             }
+        }
+
+        binding.pvPlayer.controller.binding.btnExoDownload.setOnClickListener {
+            videoDownloader.start()
         }
 
         binding.pvPlayer.controller.binding.btnExoAspectRatio.setOnClickListener {

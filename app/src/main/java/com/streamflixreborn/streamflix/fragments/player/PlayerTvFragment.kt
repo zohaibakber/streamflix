@@ -26,6 +26,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -112,6 +113,9 @@ import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 import com.streamflixreborn.streamflix.extractors.TokenManager
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadArgs
+import com.streamflixreborn.streamflix.utils.download.VideoDownloadManager
+import com.streamflixreborn.streamflix.utils.download.VideoDownloader
 
 class PlayerTvFragment : Fragment() {
     companion object {
@@ -145,6 +149,7 @@ class PlayerTvFragment : Fragment() {
     private lateinit var progressHandler: android.os.Handler
     private lateinit var progressRunnable: Runnable
     private lateinit var gestureHelper: PlayerGestureHelper
+    private lateinit var videoDownloader: VideoDownloader
 
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
@@ -252,6 +257,7 @@ class PlayerTvFragment : Fragment() {
         return binding.root
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
@@ -591,6 +597,13 @@ class PlayerTvFragment : Fragment() {
                 }
             }
 
+        videoDownloader = VideoDownloader(
+            this.requireContext(),
+            { currentVideo },
+            { currentServer },
+            { VideoDownloadArgs(args.title, args.subtitle) }
+        )
+        VideoDownloadManager.downloader = videoDownloader
 
         }
 
@@ -751,6 +764,7 @@ class PlayerTvFragment : Fragment() {
             )
         }
 
+        @RequiresApi(Build.VERSION_CODES.Q)
         private fun initializeVideo() {
             when (val type = args.videoType) {
                 is Video.Type.Episode -> {
@@ -818,6 +832,10 @@ class PlayerTvFragment : Fragment() {
             }
 
             binding.pvPlayer.controller.binding.exoProgress.setKeyTimeIncrement(10_000)
+
+            binding.pvPlayer.controller.binding.btnExoDownload.setOnClickListener {
+                videoDownloader.start()
+            }
 
             binding.pvPlayer.controller.binding.btnExoAspectRatio.setOnClickListener {
                 val newResize = UserPreferences.playerResize.next()
